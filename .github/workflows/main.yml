@@ -6,17 +6,12 @@ on:
     # ده معاد بدء التوليد بس، مش معاد النشر الفعلي؛ النشر نفسه مجدول
     # (dueAt عند Buffer، publishAt عند يوتيوب) على مواعيد منفصلة تحت.
     #
-    # حسب دراسات نشر عامة (Buffer/Hopper HQ 2026 — لا توجد بيانات خاصة
-    # بجمهور عربي تحديدًا، راجع تحليلات قناتك بعد فترة لتدقيق المواعيد):
-    # الفيديو الطويل أداؤه أفضل مساءً (7-10م، وقت فراغ فعلي)، والشورتس
-    # أداؤها أفضل صبحًا/ضهرًا (ذروة أساسية 11ص-12ظ، ثانوية ~4ع) أثناء
-    # تصفّح سريع. فالجدولة الفعلية (FULL_VIDEO_DELAY_HOURS /
-    # FULL_TO_SHORT_*_HOURS في خطوة النشر تحت) بتخلي:
-    #   • الفيديو الكامل ينشر نفس اليوم الساعة ~7م (تأخير 8 ساعات)
-    #   • short_1 ينشر اليوم التالي صباحًا ~11ص (تأخير 24 ساعة)
-    #   • short_2 ينشر اليوم التالي عصرًا ~4ع (تأخير 29 ساعة)
-    # وبالتالي الشورتس بتوصل بعد ما الفيديو الكامل يكون منشورًا بالفعل،
-    # فتفضل تأدي دورها كتشويق له.
+    # الفيديو الكامل والريل (شورت واحد بس، مقتطف من أول الفيديو، وفي
+    # آخره تنويه أعلى الشاشة "شاهد بقية الفيديو على الصفحة") بينشروا
+    # معًا في نفس التوقيت: مساءً الساعة ~7م نفس يوم التشغيل (تأخير 8
+    # ساعات من معاد التشغيل صباحًا). القيمتين FULL_VIDEO_DELAY_HOURS
+    # وFULL_TO_SHORT_1_HOURS في خطوة النشر تحت متساويتين عمدًا (8) عشان
+    # ينشروا مع بعض بالظبط.
     - cron: "0 8 * * *"
   workflow_dispatch:
 
@@ -80,10 +75,10 @@ jobs:
       - name: Generate complete narration and landscape subtitles
         run: python scripts/generate_voice.py
 
-      - name: Assemble full landscape video and platform shorts
+      - name: Assemble full landscape video and platform reel
         run: python scripts/assemble_video.py
 
-      - name: Publish full video first, then shorts
+      - name: Publish full video and reel together
         env:
           BUFFER_API_KEY: ${{ secrets.BUFFER_API_KEY }}
           BUFFER_CHANNEL_ID: ${{ secrets.BUFFER_CHANNEL_ID }}
@@ -91,9 +86,10 @@ jobs:
           BUFFER_FACEBOOK_CHANNEL_ID: ${{ secrets.BUFFER_FACEBOOK_CHANNEL_ID }}
           BUFFER_INSTAGRAM_CHANNEL_ID: ${{ secrets.BUFFER_INSTAGRAM_CHANNEL_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # نفس القيمة للاتنين عمدًا: الفيديو الكامل والريل ينشروا معًا
+          # الساعة 7 مساءً بالظبط (شوف تعليق cron فوق).
           FULL_VIDEO_DELAY_HOURS: "8"
-          FULL_TO_SHORT_1_HOURS: "24"
-          FULL_TO_SHORT_2_HOURS: "29"
+          FULL_TO_SHORT_1_HOURS: "8"
           CHANNEL_PENDING_LIMIT: "10"
         run: python scripts/publish_buffer.py
 
