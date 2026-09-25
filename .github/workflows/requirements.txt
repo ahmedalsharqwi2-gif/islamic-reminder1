@@ -1,1 +1,8 @@
 
+google-genai
+requests
+edge-tts>=6.1.9
+google-auth
+google-auth-httplib2
+google-api-python-client
+faster-whisper
