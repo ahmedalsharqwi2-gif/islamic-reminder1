@@ -1,0 +1,425 @@
+"""
+generate_script.py
+يستدعي Gemini API عشان يولّد سيناريو القصة الدينية/التاريخية الإسلامية +
+الترجمة الإنجليزية الموازية + كلمات البحث البصرية + مرجع التوثيق الشرعي.
+
+=== تعديل جديد: الانتقال من Groq إلى Gemini ===
+كانت النسخة السابقة بتستخدم Groq (نموذج openai/gpt-oss-120b). دلوقتي
+بتستخدم Google Gemini عبر حزمة "google-genai" الرسمية (pip install
+-U google-genai)، وده غيّر 3 حاجات جوهرية في السكربت:
+
+1) مفتاح البيئة بقى GEMINI_API_KEY بدل GROQ_API_KEY — لازم تحدّث الـ
+   GitHub Secret بالاسم الجديد (وتحذف القديم لو مش مستخدم في حاجة
+   تانية).
+
+2) الـ JSON Schema بتتبع صيغة Gemini (أنواع بحروف كبيرة زي "OBJECT"/
+   "STRING"/"ARRAY" بدل "object"/"string"/"array" بحروف صغيرة زي
+   OpenAI/Groq، ومفيش "additionalProperties"). عشان منحتفظش بنفس
+   الحقول مرتين، الـ schema الأساسية لسه متعرّفة بصيغة JSON Schema
+   العادية (lowercase) زي الأول، وفيه دالة to_gemini_schema() بتحوّلها
+   تلقائيًا لصيغة Gemini وقت الاستدعاء بس — أي تعديل مستقبلي على
+   الحقول (إضافة/حذف حقل) يتم في EPISODE_SCHEMA مكان واحد بس.
+
+3) مفيش reasoning_effort في Gemini زي موديلات Groq's gpt-oss. البديل
+   القريب هو ThinkingConfig(thinking_budget=...) — تحكم في مقدار
+   "التفكير الداخلي" قبل الرد. بما إن المهمة هنا توليد JSON منظم بس
+   (مش تحليل منطقي معقد)، القيمة الافتراضية GEMINI_THINKING_BUDGET=0
+   (تعطيل التفكير الإضافي) كافية وأسرع وأرخص؛ ارفعها لو حسّيت إن جودة
+   القصص المولّدة محتاجة تفكير أعمق.
+
+باقي منطق الملف (تتبع العناوين/الهوكات/المناطق المستخدمة، التحقق من
+اكتمال narration وتطابق narration_en، إعادة المحاولة عند القطع أو
+الخطأ) باقٍ كما هو تمامًا، لأنه منطق مستقل عن مزوّد الـ API.
+
+⚠️ تنويه مهم وصادق (باقٍ كما كان مع أي مزوّد API): الموديل مايقدرش
+"يتحقق" فعليًا من صحة أي حديث أو نسبة رواية بشكل قاطع — مفيش أداة بحث
+أو مطابقة أسانيد جوه السكريبت، سواء كان المزوّد Groq أو Gemini أو غيره.
+حقل "source_type"/"source_reference" بيجبر الموديل يصرّح بمرجعه
+تحديدًا لكل حلقة، عشان يبقى قابلاً للمراجعة البشرية قبل النشر.
+"""
+import os
+import json
+import sys
+from pathlib import Path
+
+from google import genai
+from google.genai import types
+
+SCRIPT_DIR = Path(__file__).parent
+PROMPT_PATH = SCRIPT_DIR.parent / "prompts" / "islamic_history_system_prompt.md"
+OUTPUT_PATH = SCRIPT_DIR.parent / "state" / "current_episode.json"
+
+# ─────────────────────────── الإعدادات ───────────────────────────
+
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+TEMPERATURE = 0.75
+MAX_OUTPUT_TOKENS = 6000
+# انظر الملاحظة رقم 3 أعلى الملف. 0 = من غير تفكير داخلي إضافي (أسرع
+# وأرخص، مناسب لمهمة توليد JSON منظم). ارفعها (مثلاً 512 أو 1024) لو
+# حابب تفكير أعمق قبل كتابة القصة على حساب سرعة/تكلفة أعلى شوية.
+THINKING_BUDGET = int(os.getenv("GEMINI_THINKING_BUDGET", "0"))
+# اتحسب على أساس إن الحلقة دايمًا بتتقسم لجزئين (زي ما assemble_video.py
+# بيفترض دايمًا)، وكل جزء له حد أقصى صلب 90 ثانية (MAX_SHORT_DURATION_SECONDS
+# في assemble_video.py). بمتوسط سرعة نطق عربي فصيح ~2.3-2.7 كلمة/ثانية:
+#   300 كلمة إجمالي (±15% = 255-345 كلمة) ≈ 94-150 ثانية إجمالي،
+#   يعني تقريبًا 47-75 ثانية للجزء الواحد بعد التقسيم بالنص — مسافة أمان
+#   كويسة تحت حد الـ90 ثانية لكل جزء.
+# لو قللت الرقم ده كتير، الجزء التاني ممكن يبقى قصير جدًا أو شبه فاضي.
+TARGET_WORDS = int(os.getenv("TARGET_WORDS", "300"))
+# فحص إضافي (اختياري): لو الـ workflow حاطط MIN_NARRATION_WORDS، أي
+# حلقة أقل من الرقم ده بالكلمات تترفض وتتعاد المحاولة. لو المتغير مش
+# موجود، الفحص متعطّل.
+MIN_NARRATION_WORDS = os.environ.get("MIN_NARRATION_WORDS")
+MIN_NARRATION_WORDS = int(MIN_NARRATION_WORDS) if MIN_NARRATION_WORDS else None
+MAX_ATTEMPTS = 2
+HISTORY_LIMIT = 8
+LENGTH_ESCALATION = 1.5
+
+# آخر N عصور/أماكن اتستخدمت — بتتبعت في الـ prompt عشان نضمن تنويع في
+# العصور والشخصيات ومنمنعش نفس العصر يتكرر أكتر من مرة قريبة.
+REGION_HISTORY_LIMIT = 6
+
+# ⚠️ لو السكريبت اللي بيجيب الفيديوهات من Pexels بيتوقع visual_keywords
+# كـ string مفصول بفواصل بدل list، غيّر "type": "array" لـ "type": "string"
+# في الـ schema تحت (to_gemini_schema() هتحوّلها تلقائيًا لصيغة Gemini
+# الصحيحة برضو).
+EPISODE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "hook": {"type": "string"},
+        "region": {"type": "string"},
+        "narration": {"type": "string"},
+        # === ترجمة إنجليزية متوازية، جملة بجملة ===
+        "narration_en": {"type": "array", "items": {"type": "string"}},
+        "visual_keywords": {"type": "array", "items": {"type": "string"}},
+        "caption": {"type": "string"},
+        "phonetic_hints": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "word": {"type": "string"},
+                    "phonetic": {"type": "string"},
+                },
+                "required": ["word", "phonetic"],
+            },
+        },
+        # === توثيق شرعي/تاريخي إلزامي لكل حلقة ===
+        "source_type": {"type": "string"},
+        "source_reference": {"type": "string"},
+    },
+    "required": [
+        "title", "hook", "region", "narration", "narration_en",
+        "visual_keywords", "caption", "phonetic_hints",
+        "source_type", "source_reference",
+    ],
+}
+
+REQUIRED_KEYS = set(EPISODE_SCHEMA["required"])
+
+
+def to_gemini_schema(schema: dict) -> dict:
+    """يحوّل تعريف JSON Schema عادي (lowercase types, زي OpenAI/Groq) إلى
+    صيغة Gemini (uppercase types: OBJECT/STRING/ARRAY...، بدون
+    additionalProperties لأن Gemini مش بتدعمها). بيتعمل تلقائيًا وقت كل
+    استدعاء، عشان EPISODE_SCHEMA فوق يفضل مصدر التعريف الوحيد لو احتجت
+    تضيف أو تشيل حقل مستقبلاً."""
+    gemini_type = schema["type"].upper()
+    result: dict = {"type": gemini_type}
+    if gemini_type == "OBJECT":
+        result["properties"] = {
+            key: to_gemini_schema(value)
+            for key, value in schema.get("properties", {}).items()
+        }
+        if "required" in schema:
+            result["required"] = schema["required"]
+    elif gemini_type == "ARRAY":
+        result["items"] = to_gemini_schema(schema["items"])
+    return result
+
+
+# ─────────────────────────── مساعدات ───────────────────────────
+
+def load_system_prompt() -> str:
+    return PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def load_used_history(limit: int = HISTORY_LIMIT) -> list[str]:
+    """يجيب آخر N عناوين عشان الموديل يتجنب التكرار."""
+    history_path = SCRIPT_DIR.parent / "state" / "used_clips.json"
+    if not history_path.exists():
+        return []
+    try:
+        data = json.loads(history_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    return [h.get("title", "") for h in data.get("history", [])][-limit:]
+
+
+def load_used_regions(limit: int = REGION_HISTORY_LIMIT) -> list[str]:
+    """
+    يجيب آخر N عصور/أماكن اتستخدمت، عشان نطلب من الموديل يتجنب تكرارها.
+    آمن على ملفات used_clips.json القديمة اللي مفيهاش حقل "region" أصلاً
+    (هيتجاهلها ببساطة من غير ما يفشل).
+    """
+    history_path = SCRIPT_DIR.parent / "state" / "used_clips.json"
+    if not history_path.exists():
+        return []
+    try:
+        data = json.loads(history_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    regions = [h.get("region", "") for h in data.get("history", []) if h.get("region")]
+    return regions[-limit:]
+
+
+def load_used_hooks(limit: int = HISTORY_LIMIT) -> list[str]:
+    """
+    يجيب آخر N هوكات اتستخدمت. الهوك بيوصف الواقعة نفسها بدقة أكتر من
+    العنوان (اللي ممكن يتغيّر صياغةً بين حلقة وحلقة عن نفس الواقعة
+    بالظبط) — بيُستخدم هنا عشان نمنع الموديل يرجع لنفس الواقعة الشهيرة
+    تحت عنوان مختلف. آمن على ملفات used_clips.json القديمة اللي مفيهاش
+    حقل "hook" أصلاً.
+    """
+    history_path = SCRIPT_DIR.parent / "state" / "used_clips.json"
+    if not history_path.exists():
+        return []
+    try:
+        data = json.loads(history_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    hooks = [h.get("hook", "") for h in data.get("history", []) if h.get("hook")]
+    return hooks[-limit:]
+
+
+def looks_truncated(narration: str) -> bool:
+    stripped = narration.strip()
+    if not stripped:
+        return True
+    return not stripped.endswith((".", "!", "؟", "?", "…", '"', "”", "»"))
+
+
+def count_arabic_sentences(narration: str) -> int:
+    """بيعدّ الجمل بنفس منطق split_sentences() في generate_voice.py
+    (تقسيم بعد نقطة/تعجب/استفهام/حذف)، عشان نتأكد إن عدد عناصر
+    narration_en هيطابق عدد الجمل وقت المزامنة الفعلية مع الصوت."""
+    import re
+    parts = re.split(r"(?<=[.!؟…])\s+", narration.strip())
+    return len([part for part in parts if part.strip()])
+
+
+def validate_episode(episode: dict) -> str | None:
+    """يرجّع رسالة الخطأ لو الحلقة فيها مشكلة، أو None لو سليمة."""
+    if not REQUIRED_KEYS.issubset(episode.keys()):
+        return f"الرد ناقص حقول مطلوبة: {sorted(episode.keys())}"
+
+    narration = str(episode.get("narration", "")).strip()
+    if looks_truncated(narration):
+        return "نص narration شكله متقطوع (مش منتهي بعلامة ترقيم واضحة)"
+
+    if MIN_NARRATION_WORDS is not None:
+        word_count = len(narration.split())
+        if word_count < MIN_NARRATION_WORDS:
+            return (
+                f"نص narration قصير جدًا ({word_count} كلمة، "
+                f"الحد الأدنى المطلوب {MIN_NARRATION_WORDS})"
+            )
+
+    if not episode.get("visual_keywords"):
+        return "حقل visual_keywords فاضي"
+
+    if not str(episode.get("hook", "")).strip():
+        return "حقل hook فاضي"
+
+    if not str(episode.get("source_type", "")).strip():
+        return "حقل source_type فاضي — كل حلقة دينية لازم توثيق لنوع المصدر"
+
+    if not str(episode.get("source_reference", "")).strip():
+        return "حقل source_reference فاضي — كل حلقة دينية لازم مرجع دقيق"
+
+    narration_en = episode.get("narration_en")
+    if not isinstance(narration_en, list) or not narration_en:
+        return "حقل narration_en فاضي أو مش قائمة (array)"
+    if any(not str(item).strip() for item in narration_en):
+        return "حقل narration_en فيه عنصر فاضي"
+
+    expected_sentences = count_arabic_sentences(narration)
+    if len(narration_en) != expected_sentences:
+        return (
+            f"عدد جمل narration_en ({len(narration_en)}) لا يطابق عدد "
+            f"جمل narration الفعلي ({expected_sentences}) — لازم يتطابقوا "
+            "بالظبط عشان تزامن الترجمة على الشاشة"
+        )
+
+    return None
+
+
+def log_usage(response, attempt: int) -> None:
+    usage = getattr(response, "usage_metadata", None)
+    if not usage:
+        return
+    print(
+        f"   🔢 محاولة {attempt} | مدخل: {usage.prompt_token_count} "
+        f"| مخرج: {usage.candidates_token_count} "
+        f"| إجمالي: {usage.total_token_count}"
+    )
+
+
+def create_completion(client: genai.Client, system_prompt: str, user_message: str, budget: int):
+    config = types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        temperature=TEMPERATURE,
+        max_output_tokens=budget,
+        response_mime_type="application/json",
+        response_schema=to_gemini_schema(EPISODE_SCHEMA),
+        thinking_config=types.ThinkingConfig(thinking_budget=THINKING_BUDGET),
+    )
+    return client.models.generate_content(
+        model=MODEL, contents=user_message, config=config,
+    )
+
+
+# ─────────────────────────── التوليد ───────────────────────────
+
+def build_user_message(
+    recent_titles: list[str], recent_regions: list[str], recent_hooks: list[str],
+) -> str:
+    message = (
+        "اكتب حلقة جديدة تمامًا.\n\n"
+        "⚠️ مهم جدًا بخصوص اللغة: اكتب حقل narration بالكامل باللغة العربية "
+        "الفصحى المبسّطة (Modern Standard Arabic) فقط. ممنوع استخدام أي "
+        "لهجة عامية أو محلية حتى لو كلمة واحدة.\n\n"
+        "⚠️ مهم جدًا جدًا بخصوص التوثيق الشرعي والتاريخي: لازم تكون القصة "
+        "مبنية حصريًا على واقعة ثابتة من القرآن الكريم، أو حديث نبوي "
+        "صحيح أو حسن، أو مصدر تاريخي إسلامي معتمد ومتفق عليه عند عامة "
+        "أهل العلم. ممنوع منعًا باتًا: اختلاق أي حوار أو تفصيلة أو اسم لم "
+        "يرد في المصدر الأصلي، استخدام أي رواية إسرائيلية غير موافقة "
+        "لما ثبت بالقرآن والسنة الصحيحة، أو الاستناد لحديث ضعيف جدًا أو "
+        "موضوع حتى لو كان منتشرًا شعبيًا. لو لست متأكدًا تمامًا من ثبوت "
+        "تفصيلة ما، لا تكتبها كحقيقة قطعية — اختر واقعة أخرى أنت متأكد "
+        "من ثبوتها. اذكر مصدرك بدقة في source_type وsource_reference.\n\n"
+        "⚠️ مهم جدًا بخصوص narration_en: بعد كتابة narration، اكتب مصفوفة "
+        "narration_en بحيث يكون كل عنصر فيها هو الترجمة الإنجليزية "
+        "الأمينة لجملة واحدة فقط من narration، بنفس الترتيب وبنفس العدد "
+        "بالضبط (التقسيم يكون بعد كل نقطة أو علامة تعجب أو علامة "
+        "استفهام أو علامات حذف، تمامًا كما تُقسَّم narration نفسها لجمل). "
+        "لو عدد الجمل العربية 12 جملة مثلًا، لازم narration_en تحتوي على "
+        "12 عنصرًا بالضبط لا أكثر ولا أقل.\n\n"
+        "⚠️ مهم جدًا جدًا بخصوص عدم التكرار: ممنوع منعًا باتًا اختيار نفس "
+        "الواقعة اللي اتستخدمت في حلقة سابقة، حتى لو غيّرت العنوان أو "
+        "الصياغة بالكامل. راجع قائمة الهوكات (وليس العناوين فقط) اللي "
+        "اتستخدمت قبل كده تحت — لو الواقعة اللي في بالك بتوصف نفس حادثة "
+        "أي هوك منهم، ارفضها فورًا واختار واقعة مختلفة تمامًا.\n\n"
+        "⚠️ مهم جدًا بخصوص الهوك: أول جملة في حقل hook لازم تكون مشوّقة "
+        "ومباشرة وتخلق فضول فوري (سؤال مثير، أو تفصيلة تاريخية مدهشة "
+        "وحقيقية، أو مشهد لحظة الذروة) — من غير أي تهويل يخالف وقار "
+        "الموضوع الديني. وبعدين ابدأ narration بنفس الهوك أو صياغة قريبة "
+        "جدًا منه كأول جملة فيه، مش بمقدمة عامة بطيئة.\n\n"
+        "⚠️ مهم جدًا بخصوص visual_keywords: كل كلمة بحث لازم تكون مشتقة "
+        "من تفصيلة ملموسة ومحددة مذكورة فعليًا في narration، وممنوع "
+        "منعًا باتًا أي كلمة بحث ممكن تنتج لقطة فيها تجسيد بشري لنبي أو "
+        "خليفة راشد أو صحابي بعينه — طبيعة/عمارة إسلامية تاريخية/مخطوطات "
+        "وخط عربي/أشخاص مجهولي الهوية بس.\n\n"
+        "⚠️ التنويع: اختار عصرًا/شخصية محورية مختلفة عن اللي اتذكرت قبل "
+        "كده (تحت). حط وصف المكان والعصر في حقل region.\n\n"
+        f"الطول المستهدف لحقل narration: حوالي {TARGET_WORDS} كلمة (±15%).\n"
+        "لازم القصة تكون مكتملة: بداية واضحة (الهوك)، تصاعد حقيقي مبني "
+        "على المصدر نفسه، وخاتمة فيها عبرة أو حكمة تقفل القصة من غير "
+        "تقطيع.\n"
+        "اكتب النص النهائي مباشرة: من غير أي تمهيد أو شرح أو تعليق."
+    )
+    if recent_titles:
+        message += (
+            "\n\nالعناوين اللي اتستخدمت قبل كده (تجنب أي تشابه معاها):\n- "
+            + "\n- ".join(recent_titles)
+        )
+    if recent_hooks:
+        message += (
+            "\n\nالهوكات (ومن ثم الوقائع الفعلية) اللي اتستخدمت قبل كده — "
+            "ممنوع اختيار نفس الواقعة حتى بهوك أو عنوان مختلف:\n- "
+            + "\n- ".join(recent_hooks)
+        )
+    if recent_regions:
+        message += (
+            "\n\nالعصور/الأماكن اللي اتستخدمت قبل كده (اختار عصرًا مختلفًا "
+            "عنها):\n- " + "\n- ".join(recent_regions)
+        )
+    return message
+
+
+def generate_episode() -> dict:
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        sys.exit("خطأ: لازم تضيف GEMINI_API_KEY في GitHub Secrets")
+
+    client = genai.Client(api_key=api_key)
+    system_prompt = load_system_prompt()
+    user_message = build_user_message(
+        load_used_history(), load_used_regions(), load_used_hooks(),
+    )
+
+    budget = MAX_OUTPUT_TOKENS
+    last_error = "لا يوجد"
+
+    print(f"🕌 الموديل: {MODEL} | thinking_budget: {THINKING_BUDGET}")
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            response = create_completion(client, system_prompt, user_message, budget)
+        except Exception as exc:  # noqa: BLE001 — أخطاء شبكة/حصة/حجب أمان من Gemini
+            last_error = f"فشل استدعاء Gemini API ({exc})"
+            print(f"⚠️ محاولة {attempt}/{MAX_ATTEMPTS}: {last_error} — هعيد المحاولة...")
+            continue
+
+        log_usage(response, attempt)
+
+        candidates = getattr(response, "candidates", None) or []
+        finish_reason = str(candidates[0].finish_reason) if candidates else ""
+
+        if "MAX_TOKENS" in finish_reason:
+            budget = int(budget * LENGTH_ESCALATION)
+            last_error = "الرد اتقطع بسبب حد التوكنز (finish_reason=MAX_TOKENS)"
+            print(f"⚠️ {last_error} — هرفع السقف لـ {budget} وأعيد المحاولة...")
+            continue
+
+        if "SAFETY" in finish_reason or "PROHIBITED" in finish_reason or "BLOCKLIST" in finish_reason:
+            last_error = f"الرد اتحجب من Gemini (finish_reason={finish_reason})"
+            print(f"⚠️ محاولة {attempt}/{MAX_ATTEMPTS}: {last_error} — هعيد المحاولة...")
+            continue
+
+        raw = response.text or ""
+
+        try:
+            episode = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            last_error = f"رد غير صالح JSON ({exc})"
+            print(f"⚠️ محاولة {attempt}/{MAX_ATTEMPTS}: {last_error} — هعيد المحاولة...")
+            continue
+
+        error = validate_episode(episode)
+        if error:
+            last_error = error
+            print(f"⚠️ محاولة {attempt}/{MAX_ATTEMPTS}: {last_error} — هعيد المحاولة...")
+            continue
+
+        return episode
+
+    sys.exit(
+        f"❌ فشل توليد حلقة سليمة بعد {MAX_ATTEMPTS} محاولات. آخر خطأ: {last_error}"
+    )
+
+
+if __name__ == "__main__":
+    episode = generate_episode()
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT_PATH.write_text(
+        json.dumps(episode, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"✅ اتكتبت الحلقة: {episode['title']}")
+    print(f"   العصر/المكان: {episode.get('region', 'غير محدد')}")
+    print(f"   الهوك: {episode.get('hook', '')[:80]}")
+    print(f"   المصدر: {episode.get('source_type', '')} — {episode.get('source_reference', '')}")
+    print(f"   عدد جمل narration_en: {len(episode.get('narration_en', []))}")
+    print(f"   كلمات البحث: {episode['visual_keywords']}")
+    print(f"   تلميحات النطق: {episode.get('phonetic_hints', [])}")
