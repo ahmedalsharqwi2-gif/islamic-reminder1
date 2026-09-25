@@ -42,6 +42,20 @@
    يفشل شروط الـ Shorts. الحل: دالة strip_shorts_hashtag() بتشيل أي
    هاشتاج #Shorts/#Short من نص البوست الخاص بالفيديو الكامل تحديدًا
    (caption + hashtags المجمّعة) قبل إرساله لـ Buffer.
+
+=== إصلاح جديد: تكرار النشر بسبب معرّف قناة قديم متبقّي ===
+كان build_channel_services() بيضيف معرّفَي قناة قديمين (يوتيوب وفيسبوك)
+كـ fallback عبر setdefault() *بجانب* المعرّفات الصحيحة الجاية من
+BUFFER_YOUTUBE_CHANNEL_ID / BUFFER_FACEBOOK_CHANNEL_ID، مش بدلًا منها —
+لأن مفتاح الـ dict هنا هو channel_id نفسه (مش اسم المنصة)، فمعرّفين
+مختلفين لنفس المنصة بيتحسبوا كـ entries منفصلة تمامًا. النتيجة: كل حلقة
+كانت بتتنشر مرتين ليوتيوب ومرتين لفيسبوك — مرة على القناة الصحيحة (تنجح)
+ومرة على القناة القديمة (تفشل بـ"Actor can not access" لأن التوكن الحالي
+مالوش صلاحية عليها). الحل: حذف الـ fallback القديم نهائيًا بما إن كل
+القنوات دلوقتي بتتحدد صراحة عبر GitHub Secrets، مع إضافة حارس أمان
+(انظر build_channel_services()) بيوقف التنفيذ فورًا برسالة واضحة لو أي
+منصة ظهرلها أكتر من معرّف قناة واحد في نفس الوقت مستقبلًا، بدل ما تتكرر
+المشكلة دي بصمت تاني.
 """
 
 from __future__ import annotations
@@ -94,7 +108,12 @@ def strip_shorts_hashtag(text: str) -> str:
 
 
 def build_channel_services() -> dict[str, str]:
-    result = {}
+    """يبني dict بصيغة {channel_id: service_name} من الـ GitHub Secrets
+    الصريحة فقط (BUFFER_YOUTUBE_CHANNEL_ID / BUFFER_FACEBOOK_CHANNEL_ID /
+    BUFFER_INSTAGRAM_CHANNEL_ID). لا يوجد أي fallback لمعرّفات قديمة —
+    شوف شرح "إصلاح جديد: تكرار النشر..." أعلى الملف لتفاصيل ليه اتشالت.
+    """
+    result: dict[str, str] = {}
     for env_name, service in {
         "BUFFER_YOUTUBE_CHANNEL_ID": "youtube",
         "BUFFER_FACEBOOK_CHANNEL_ID": "facebook",
@@ -103,9 +122,27 @@ def build_channel_services() -> dict[str, str]:
         value = os.environ.get(env_name, "").strip()
         if value:
             result[value] = service
-    # توافق مع المعرّفات القديمة الموجودة في النسخة السابقة.
-    result.setdefault("6aaa8778ea19ca0bde57da16", "youtube")
-    result.setdefault("6aaa853fea19ca0bde57b5f7", "facebook")
+
+    # حارس أمان: لو أي منصة عندها أكتر من channel_id واحد بيشاور عليها في
+    # نفس الوقت (سواء بسبب fallback قديم يترجع بالغلط تاني، أو غلطة نسخ/لصق
+    # في الـ Secrets، أو أي سبب تاني مستقبلي)، نوقف التنفيذ فورًا برسالة
+    # واضحة بدل ما ننشر نفس المحتوى مرتين لنفس المنصة بصمت (أو ننجح مرة
+    # ونفشل بـ"Actor can not access" في التانية، زي ما حصل بالظبط قبل ما
+    # تتشال المعرّفات القديمة).
+    service_to_ids: dict[str, list[str]] = {}
+    for channel_id, svc in result.items():
+        service_to_ids.setdefault(svc, []).append(channel_id)
+    duplicated = {svc: ids for svc, ids in service_to_ids.items() if len(ids) > 1}
+    if duplicated:
+        details = "; ".join(
+            f"{svc}: {', '.join(ids)}" for svc, ids in duplicated.items()
+        )
+        raise RuntimeError(
+            "تعارض في معرّفات القنوات: منصة واحدة عندها أكتر من channel_id "
+            f"معرّف في نفس الوقت ({details}). تأكد إن كل BUFFER_*_CHANNEL_ID "
+            "بيشاور على قناة واحدة بس، وشيل أي معرّف قديم أو مكرر."
+        )
+
     return result
 
 
@@ -280,10 +317,9 @@ def create_post(video_url: str, text: str, title: str, channel_id: str, api_key:
 
 
 def channel_ids() -> list[str]:
-    # بقت دايمًا بترجع كل القنوات المعرّفة فعليًا (من BUFFER_YOUTUBE_CHANNEL_ID
-    # / BUFFER_FACEBOOK_CHANNEL_ID / BUFFER_INSTAGRAM_CHANNEL_ID) بدل ما تعتمد
-    # على BUFFER_CHANNEL_ID المنفصل، اللي كان ممكن يفضل من غير تحديث ويستبعد
-    # قناة زي انستجرام بصمت تام من غير أي رسالة خطأ في اللوج.
+    # بترجع كل القنوات المعرّفة فعليًا (من BUFFER_YOUTUBE_CHANNEL_ID /
+    # BUFFER_FACEBOOK_CHANNEL_ID / BUFFER_INSTAGRAM_CHANNEL_ID) بدون أي
+    # fallback لمعرّفات قديمة — شوف build_channel_services() أعلاه.
     return list(CHANNEL_SERVICES.keys())
 
 
