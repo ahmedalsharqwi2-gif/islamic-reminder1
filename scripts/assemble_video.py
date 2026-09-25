@@ -6,11 +6,10 @@ assemble_video.py
 1) فيديو كامل أفقي 16:9:
    output/final_video_full.mp4
 
-2) شورتس رأسية 9:16، مقتطفة من الفيديو الكامل وتتوقف قبل النهاية/الحل:
+2) ريل واحد رأسي 9:16، مقتطف من أول الفيديو الكامل ويتوقف قبل النهاية/الحل:
    output/short_1_youtube.mp4
    output/short_1_facebook.mp4
    output/short_1_instagram.mp4
-   ...
 
 مصدر الحقيقة للصوت والترجمة هو current_episode.json. يدعم الملف الحقول الجديدة:
 
@@ -18,15 +17,32 @@ assemble_video.py
   "final_audio": "downloaded_clips/narration_with_music.mp3",
   "subtitles": "downloaded_clips/narration.ass",
   "shorts": [
-    {"start_seconds": 0, "end_seconds": 75},
-    {"start_seconds": 80, "end_seconds": 145}
+    {"start_seconds": 0, "end_seconds": 75}
   ]
 }
 
-إذا لم توجد قائمة shorts، يتم إنشاء شورتين تلقائيًا من بداية/منتصف الفيديو،
+إذا لم توجد قائمة shorts، يتم إنشاء ريل واحد تلقائيًا من بداية الفيديو،
 مع ترك AUTO_END_MARGIN_SECONDS في نهاية الحلقة حتى لا يصل المقتطف إلى الحل.
 
-مهم: مدة 90 ثانية حد للشورتس فقط، وليست حدًا للفيديو الكامل.
+مهم: مدة 90 ثانية حد للريل فقط، وليست حدًا للفيديو الكامل.
+
+=== تعديل جديد: ريل واحد بس بدل شورتين ===
+كان بيتنتج شورتان (short_1 من البداية، short_2 من المنتصف تقريبًا).
+المطلوب دلوقتي ريل واحد بس، يبدأ من أول الفيديو مباشرة، مع تنويه في
+آخره يوجّه المشاهد لمشاهدة بقية الفيديو على الصفحة. الحل: DEFAULT_SHORT_COUNT
+بقت 1 بدل 2 — default_short_specs() أصلًا كانت بتدعم أي عدد، فمع القيمة
+الجديدة بترجع ريل واحد بس يبدأ من الثانية صفر (start=0) ويمتد لحد
+MAX_SHORT_DURATION_SECONDS أو حد الهامش قبل النهاية، أيهما أصغر.
+
+=== تعديل جديد: تنويه الريل أعلى الشاشة بنفس خط الترجمة ===
+كان التنويه (CTA) بيتحط في أسفل الشاشة تقريبًا (Alignment=2، MarginV=180)
+بخط Arial حجم 62 — ده كان بيقرب جدًا من مكان الترجمة النصية (العربي
+والإنجليزي) اللي بتتحط أسفل الفيديو في generate_voice.py (MarginV=90
+وMarginV=260 على التوالي)، وبخط بحجم مختلف شوية. المطلوب: مكان منفصل
+تمامًا (بعيد عن الأسكربت) وبنفس حجم ونوع خط الترجمة بالظبط. الحل في
+write_cta_ass(): الخط بقى Arial حجم 58 (نفس حجم Caption/Translation في
+generate_voice.py بالظبط)، والمكان بقى أعلى الشاشة (Alignment=8: أعلى
+الوسط) بدل أسفلها — فمفيش أي تداخل بصري ممكن بين التنويه والترجمة تحت.
 """
 
 from __future__ import annotations
@@ -49,11 +65,13 @@ EPISODE_PATH = STATE_DIR / "current_episode.json"
 FULL_WIDTH = 1920
 FULL_HEIGHT = 1080
 
-# الشورتس: رأسي 9:16
+# الريل: رأسي 9:16
 SHORT_WIDTH = 1080
 SHORT_HEIGHT = 1920
 MAX_SHORT_DURATION_SECONDS = 90.0
-DEFAULT_SHORT_COUNT = 2
+# ريل واحد بس (كان 2 قبل كده) — يبدأ من أول الفيديو مباشرة. شوف شرح
+# "ريل واحد بس بدل شورتين" أعلى الملف.
+DEFAULT_SHORT_COUNT = 1
 AUTO_END_MARGIN_SECONDS = 8.0
 CTA_DURATION_SECONDS = 4.0
 FPS = 24
@@ -211,7 +229,17 @@ def build_full_video(
 
 
 def write_cta_ass(path: Path, start: float, end: float, text: str) -> None:
-    """ينشئ Overlay ASS عربيًا بدل drawtext لتفادي مشاكل تشكيل العربية."""
+    """ينشئ Overlay ASS عربيًا بدل drawtext لتفادي مشاكل تشكيل العربية.
+
+    التنويه بيتحط أعلى الشاشة (Alignment=8: أعلى الوسط) بدل أسفلها، عشان
+    يبقى في مكان منفصل تمامًا وبعيد عن الترجمة النصية (الأسكربت) اللي
+    بتتحط أسفل الفيديو في generate_voice.py (خطوط Caption للعربي بـ
+    MarginV=90، وTranslation للإنجليزي بـ MarginV=260) — فمفيش أي تداخل
+    بصري ممكن بينهم. الخط والحجم (Arial، 58) مطابقين بالظبط لخط الترجمة
+    نفسه (شوف build_ass_header() في generate_voice.py)، وباقي إعدادات
+    الحدود (BorderStyle/Outline/Shadow) نفسها كمان لاتساق شكل النص في
+    الفيديو كله.
+    """
     def ass_time(seconds: float) -> str:
         centiseconds = max(0, int(round(seconds * 100)))
         hours, rem = divmod(centiseconds, 360000)
@@ -232,9 +260,11 @@ def write_cta_ass(path: Path, start: float, end: float, text: str) -> None:
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        # أبيض مع خلفية شبه شفافة، أسفل/منتصف الشاشة.
-        "Style: CTA,Arial,62,&H00FFFFFF,&H00FFFFFF,&H00101010,&H99000000,"
-        "1,0,0,0,100,100,0,0,1,4,1,2,70,70,180,1\n\n"
+        # أبيض، بنفس خط وحجم ترجمة الفيديو بالظبط (Arial 58، Outline=3،
+        # Shadow=0 — مطابق لستايل Caption/Translation في generate_voice.py)،
+        # أعلى الشاشة (Alignment=8) عشان يبعد تمامًا عن الترجمة السفلية.
+        "Style: CTA,Arial,58,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,"
+        "1,0,0,0,100,100,0,0,1,3,0,8,70,70,120,1\n\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
         "Effect, Text\n"
@@ -244,7 +274,9 @@ def write_cta_ass(path: Path, start: float, end: float, text: str) -> None:
 
 
 def default_short_specs(full_duration: float) -> list[dict]:
-    """ينشئ شورتين تلقائيًا ويترك هامشًا قبل نهاية القصة."""
+    """ينشئ ريل/ريلات تلقائيًا تبدأ من أول الفيديو وتترك هامشًا قبل
+    نهاية القصة. مع DEFAULT_SHORT_COUNT=1 (القيمة الحالية) بترجع ريل
+    واحد بس يبدأ من الثانية صفر."""
     usable_end = max(1.0, full_duration - AUTO_END_MARGIN_SECONDS)
     if usable_end <= 1:
         return [{"start_seconds": 0.0, "end_seconds": min(full_duration, MAX_SHORT_DURATION_SECONDS)}]
@@ -295,7 +327,7 @@ def create_short(
     end = float(spec["end_seconds"])
     duration = min(end - start, MAX_SHORT_DURATION_SECONDS)
     if duration <= 0:
-        raise ValueError("مدة الشورت يجب أن تكون أكبر من صفر")
+        raise ValueError("مدة الريل يجب أن تكون أكبر من صفر")
 
     cta_start = max(0.0, duration - CTA_DURATION_SECONDS)
     cta_ass = CLIPS_DIR / f"cta_short_{short_index}_{platform}.ass"
@@ -382,7 +414,7 @@ def main() -> None:
     print(f"✅ مدة الفيديو الكامل: {full_duration:.1f} ثانية")
 
     specs = load_short_specs(episode, full_duration)
-    print(f"✅ عدد الشورتس: {len(specs)} — الحد الأقصى لكل شورت: {MAX_SHORT_DURATION_SECONDS:.0f}s")
+    print(f"✅ عدد الريلات: {len(specs)} — الحد الأقصى لكل ريل: {MAX_SHORT_DURATION_SECONDS:.0f}s")
 
     generated = 0
     for short_index, spec in enumerate(specs, 1):
@@ -391,14 +423,14 @@ def main() -> None:
             duration = create_short(full_output, spec, short_index, platform, output)
             generated += 1
             print(
-                f"✅ شورت {short_index} / {platform}: {output} "
+                f"✅ ريل {short_index} / {platform}: {output} "
                 f"({duration:.1f}s، يتوقف قبل نهاية القصة)"
             )
 
     if generated == 0:
-        sys.exit("❌ لم يتم إنشاء أي شورت.")
+        sys.exit("❌ لم يتم إنشاء أي ريل.")
 
-    print("✅ اكتمل إنتاج الفيديو الكامل والشورتس لجميع المنصات.")
+    print("✅ اكتمل إنتاج الفيديو الكامل والريل لجميع المنصات.")
 
 
 if __name__ == "__main__":
