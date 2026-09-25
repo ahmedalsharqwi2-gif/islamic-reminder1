@@ -5,7 +5,30 @@ fetch_clips.py
 
 يحتاج: متغير بيئة PEXELS_API_KEY (مجاني من https://www.pexels.com/api/)
 
-=== تعديل جديد: تسجيل region في الهيستوري ===
+=== تعديل جديد: قيد العصر التاريخي واستبعاد اللقطات المعاصرة ===
+القصص هنا تاريخية إسلامية، وأي لقطة فيها عنصر عصري حديث (سيارات، مباني
+زجاجية حديثة، هواتف ذكية، طرق سريعة، إلخ) بتكسر الإحساس بالزمن وتبقى
+غير مناسبة تمامًا حتى لو طابقت كلمة البحث تقنيًا.
+
+⚠️ تنويه تقني صادق: Pexels API مفيهوش حقل "tags" أو وصف نصي منفصل
+لفيديوهاته (بعكس الصور اللي عندها tags)، ومفيش أي عامل استبعاد
+(exclude operator) في البحث نفسه. الفلترة هنا بتعتمد بشكل عملي على
+تحليل الـ slug الوصفي الموجود جوه رابط كل فيديو (video["url"]، زي
+".../video/aerial-view-of-a-city-at-night-1093662/") ومقارنته بقائمة
+MODERN_EXCLUDE_TERMS. ده حل تقريبي معقول لكنه مش مضمون بالكامل: ممكن
+يفوت كليب عصري لو الرابط مالوش وصف كافٍ، أو يستبعد كليب بريء بالغلط
+لو الوصف فيه كلمة متشابهة. مفيش بديل أدق متاح فعليًا من الـ API نفسه.
+
+منطق البحث بقى بثلاث مستويات لكل كلمة بحث (شوف search_with_fallback):
+  1) نفس الكلمة + فلترة صارمة تستبعد أي كليب فيه مؤشر على عصر حديث.
+  2) لو مفيش نتائج: نفس الكلمة من غير الفلترة الصارمة (احتياطًا لكلمة
+     بحث محددة جدًا خلت الفلترة تستبعد كل شيء بالغلط).
+  3) لو لسه مفيش: البحث بدلًا من كلمة الحلقة في قائمة ثابتة من كلمات
+     دينية إسلامية عامة (ISLAMIC_FALLBACK_KEYWORDS) مع نفس الفلترة
+     الصارمة — عشان نضمن إن الكليب النهائي على الأقل مرتبط دينيًا/
+     تاريخيًا حتى لو مش مطابقًا تمامًا لتفصيلة القصة.
+
+=== تعديل سابق: تسجيل region في الهيستوري ===
 كان الهيستوري بيسجّل "title" بس مع كل حلقة. دلوقتي بيسجّل "region" كمان
 (المنطقة/الدولة اللي القصة منها، جاية من current_episode.json اللي
 generate_script.py بيكتبه) — عشان load_used_regions() في generate_script.py
@@ -37,6 +60,7 @@ generate_script.py بيكتبه) — عشان load_used_regions() في generate_
 """
 import os
 import json
+import re
 import sys
 import time
 import requests
@@ -71,6 +95,42 @@ MIN_DURATION_SECONDS = 4    # نتجنب الكليبات القصيرة جدً�
 # عدد محاولات التحميل القصوى لكل كليب (لو انقطع الاتصال أثناء التحميل).
 DOWNLOAD_MAX_ATTEMPTS = 4
 
+# كلمات دالة على عناصر عصرية/معاصرة. لو ظهرت في الوصف المستخرج من رابط
+# الكليب (شوف clip_description_slug)، نستبعد الكليب فورًا حتى لو طابق
+# كلمة البحث الأصلية، لأنه هيكسر الإحساس بالعصر التاريخي للحلقة. القائمة
+# تقريبية وقابلة للتوسيع — أضف أي كلمة لاحظت تسربها في لقطات سابقة.
+MODERN_EXCLUDE_TERMS = {
+    "car", "cars", "traffic", "highway", "freeway", "smartphone", "phone",
+    "iphone", "laptop", "computer", "modern", "skyline", "skyscraper",
+    "neon", "airplane", "aircraft", "jet", "helicopter", "train", "subway",
+    "metro", "office", "gym", "fitness", "mall", "supermarket", "wifi",
+    "drone", "electric", "bicycle", "motorcycle", "bus", "truck", "stadium",
+    "concert", "nightclub", "television", "internet", "led", "billboard",
+    "apartment", "elevator", "escalator", "shopping", "parking", "urban",
+    "downtown", "contemporary", "tourist", "tourists", "selfie", "camera",
+    "studio", "microphone", "headphones", "game", "gaming", "keyboard",
+    "monitor", "screen", "app", "social-media", "credit-card", "atm",
+}
+
+# كلمات بحث احتياطية دينية/إسلامية عامة، مستخدمة فقط لو فشل البحث
+# بالكلمة الأصلية (حتى بعد إلغاء الفلترة الصارمة) — يعني آخر خط دفاع
+# قبل ما نضطر نتخطى الكلمة دي خالص. كلها كلمات محايدة زمنيًا (عمارة/
+# طبيعة/مخطوطات) عشان تناسب أي عصر إسلامي تقريبًا.
+ISLAMIC_FALLBACK_KEYWORDS = [
+    "islamic architecture",
+    "mosque courtyard",
+    "arabic calligraphy",
+    "old quran manuscript",
+    "desert dunes",
+    "ancient mosque",
+    "minaret silhouette",
+    "islamic geometric pattern",
+    "old stone archway",
+    "desert caravan",
+    "ancient city ruins",
+    "arabian desert night sky",
+]
+
 
 def _build_session() -> requests.Session:
     """Session واحدة لكل الطلبات (بحث + تحميل) مع Retry adapter بيعيد
@@ -101,8 +161,36 @@ def load_json(path: Path, default):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def search_pexels(keyword: str, api_key: str, used_ids: set, count: int) -> list[dict]:
-    """يرجّع لحد `count` كليبات جديدة (مش مستخدمة قبل كده) لكلمة البحث دي."""
+def clip_description_slug(video: dict) -> str:
+    """يستخرج الوصف النصي التقريبي من رابط الفيديو نفسه على Pexels (اللي
+    بيحتوي عادةً على كلمات وصفية زي
+    ".../video/aerial-view-of-a-city-at-night-1093662/")، عشان نقدر
+    نفحص الكليب بحثًا عن كلمات دالة على العصر الحديث حتى لو كلمة البحث
+    نفسها كانت بريئة. لو الرابط مالوش وصف واضح، بترجع نص فاضي (يعني مفيش
+    فلترة هتحصل عليه — الفلترة تحفّظية، مش قاطعة)."""
+    url = str(video.get("url", ""))
+    slug = url.rstrip("/").rsplit("/", 1)[-1]
+    # نشيل الرقم التسلسلي في آخر الـ slug (زي "-1093662")
+    slug = re.sub(r"-\d+$", "", slug)
+    return slug.replace("-", " ").lower()
+
+
+def looks_contemporary(video: dict) -> bool:
+    """True لو الوصف المستخرج من رابط الكليب فيه أي كلمة من
+    MODERN_EXCLUDE_TERMS. شوف تنويه الدقة في أعلى الملف."""
+    description = clip_description_slug(video)
+    if not description:
+        return False
+    words = set(description.split())
+    return any(term in words or term in description for term in MODERN_EXCLUDE_TERMS)
+
+
+def search_pexels(
+    keyword: str, api_key: str, used_ids: set, count: int, strict_era: bool = True,
+) -> list[dict]:
+    """يرجّع لحد `count` كليبات جديدة (مش مستخدمة قبل كده) لكلمة البحث دي.
+    لو strict_era=True (الافتراضي)، بيستبعد أي كليب looks_contemporary()
+    ترجع True له، حتى لو طابق كلمة البحث تقنيًا."""
     headers = {"Authorization": api_key}
     found: list[dict] = []
     seen_ids_this_search: set[int] = set()
@@ -132,6 +220,8 @@ def search_pexels(keyword: str, api_key: str, used_ids: set, count: int) -> list
                 continue
             if video["duration"] < MIN_DURATION_SECONDS:
                 continue
+            if strict_era and looks_contemporary(video):
+                continue
 
             # اختار أفضل جودة فيديو ملف (HD لو موجود)
             video_files = sorted(
@@ -151,6 +241,49 @@ def search_pexels(keyword: str, api_key: str, used_ids: set, count: int) -> list
             seen_ids_this_search.add(video["id"])
 
     return found
+
+
+def search_with_fallback(
+    keyword: str, api_key: str, used_ids: set, count: int,
+) -> list[dict]:
+    """يبحث عن كليبات مناسبة لكلمة البحث بثلاث مستويات متدرّجة (شوف شرح
+    "قيد العصر التاريخي" أعلى الملف):
+      1) نفس الكلمة + فلترة صارمة تستبعد أي مؤشر على عصر حديث.
+      2) نفس الكلمة من غير الفلترة الصارمة (احتياطًا لكلمة محددة جدًا).
+      3) قائمة كلمات دينية إسلامية عامة (ISLAMIC_FALLBACK_KEYWORDS) مع
+         فلترة صارمة، مجمّعة من أكتر من كلمة احتياطية لو احتاج الأمر.
+    """
+    results = search_pexels(keyword, api_key, used_ids, count, strict_era=True)
+    if results:
+        return results
+
+    results = search_pexels(keyword, api_key, used_ids, count, strict_era=False)
+    if results:
+        print(
+            f"⚠️  '{keyword}': مفيش كليبات مطابقة لقيد العصر التاريخي الصارم — "
+            "تم القبول بنتائج غير مفلترة زمنيًا لعدم توفر بديل أفضل"
+        )
+        return results
+
+    print(
+        f"⚠️  '{keyword}': لا توجد أي نتيجة مناسبة — البحث بدلًا منه في "
+        "كلمات دينية إسلامية عامة"
+    )
+    collected: list[dict] = []
+    already_used_this_call = set(used_ids)
+    for fallback_keyword in ISLAMIC_FALLBACK_KEYWORDS:
+        if len(collected) >= count:
+            break
+        remaining = count - len(collected)
+        fb_results = search_pexels(
+            fallback_keyword, api_key, already_used_this_call, remaining, strict_era=True,
+        )
+        for item in fb_results:
+            already_used_this_call.add(item["id"])
+        collected.extend(fb_results)
+    if collected:
+        print(f"   ↳ اتلقى {len(collected)} كليب بديل من الكلمات الدينية العامة")
+    return collected
 
 
 def download_clip(url: str, dest: Path, max_attempts: int = DOWNLOAD_MAX_ATTEMPTS):
@@ -204,9 +337,9 @@ def main():
         remaining_budget = MAX_TOTAL_CLIPS - len(fetched_clips)
         wanted = min(CLIPS_PER_KEYWORD, remaining_budget)
 
-        results = search_pexels(keyword, api_key, used_ids, wanted)
+        results = search_with_fallback(keyword, api_key, used_ids, wanted)
         if not results:
-            print(f"⚠️  مفيش كليبات جديدة لكلمة '{keyword}' — هنتخطاها")
+            print(f"⚠️  مفيش كليبات جديدة لكلمة '{keyword}' حتى بعد كل محاولات البديل — هنتخطاها")
             continue
 
         for result in results:
@@ -239,8 +372,7 @@ def main():
         # الهوك بيوصف الحادثة الواقعية نفسها بدقة أكتر من العنوان (اللي
         # ممكن يتغيّر صياغةً بين حلقة وحلقة عن نفس الحادثة بالظبط). بيُقرأ
         # لاحقًا في load_used_hooks() جوه generate_script.py عشان نمنع
-        # الموديل يرجع لنفس القضية الشهيرة (زي حادثة ممر دياتلوف) حتى لو
-        # غيّر صياغة العنوان.
+        # الموديل يرجع لنفس الواقعة الشهيرة حتى لو غيّر صياغة العنوان.
         "hook": episode.get("hook", ""),
         # المنطقة/الدولة اللي القصة منها (من generate_script.py) — بتُقرأ
         # لاحقًا في load_used_regions() جوه generate_script.py عشان نمنع
