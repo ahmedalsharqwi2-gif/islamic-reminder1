@@ -1,11 +1,14 @@
 """نشر أصول الحلقة الجديدة عبر Buffer.
 
 الترتيب:
-- الفيديو الكامل الأفقي أولًا.
-- short_1 بعد FULL_TO_SHORT_1_HOURS (افتراضيًا 3 ساعات).
-- short_2 بعد FULL_TO_SHORT_2_HOURS (افتراضيًا 7 ساعات).
+- الفيديو الكامل الأفقي والريل (شورت واحد فقط، من أول الفيديو) بينشروا
+  معًا في نفس التوقيت: الفيديو عند FULL_VIDEO_DELAY_HOURS، والريل عند
+  FULL_TO_SHORT_1_HOURS. اضبط القيمتين على نفس الرقم في main.yml (مثلاً
+  "8" للنشر الساعة 7 مساءً) عشان ينشروا مع بعض بالظبط.
 
-لا يوجد هنا منطق part1/part2. كل أصل يرفع وينشر Native على كل قناة.
+لا يوجد هنا منطق part1/part2، ولا يوجد شورت ثانٍ (short_2) — الحلقة
+بتنتج ريلًا واحدًا بس حاليًا (شوف DEFAULT_SHORT_COUNT في assemble_video.py).
+كل أصل يرفع وينشر Native على كل قناة.
 
 === إصلاح جديد (يوتيوب / انستجرام) ===
 1) يوتيوب: Buffer's `YoutubePostMetadataInput` ليس فيه حقل `type` إطلاقًا
@@ -56,6 +59,15 @@ BUFFER_YOUTUBE_CHANNEL_ID / BUFFER_FACEBOOK_CHANNEL_ID، مش بدلًا منه�
 (انظر build_channel_services()) بيوقف التنفيذ فورًا برسالة واضحة لو أي
 منصة ظهرلها أكتر من معرّف قناة واحد في نفس الوقت مستقبلًا، بدل ما تتكرر
 المشكلة دي بصمت تاني.
+
+=== إصلاح جديد: الفيديو والريل ينشروا معًا بنفس التوقيت ===
+كان فيه شورتان بتأخيرين مختلفين (short_1 بعد 24 ساعة، short_2 بعد 29
+ساعة) — نُشرا بعد الفيديو الكامل بيوم كامل تقريبًا. المطلوب دلوقتي: ريل
+واحد بس (شوف assemble_video.py) ينشر في نفس لحظة نشر الفيديو الكامل
+بالظبط. الحل: حذف FULL_TO_SHORT_2_HOURS نهائيًا (مفيش short_2 أصلًا
+دلوقتي)، وكل الريلات الموجودة (حاليًا واحد بس) بتاخد نفس تأخير
+FULL_TO_SHORT_1_HOURS — لازم تظبطه في main.yml بنفس قيمة
+FULL_VIDEO_DELAY_HOURS بالظبط (مثلاً "8" لنشر الاتنين الساعة 7 مساءً).
 """
 
 from __future__ import annotations
@@ -80,8 +92,11 @@ RELEASE_TAG = "media-assets"
 CHANNEL_PENDING_LIMIT = int(os.environ.get("CHANNEL_PENDING_LIMIT", "10"))
 ENABLE_PREFLIGHT_CHECK = os.environ.get("ENABLE_PREFLIGHT_CHECK", "true").lower() != "false"
 
-FULL_TO_SHORT_1_HOURS = float(os.environ.get("FULL_TO_SHORT_1_HOURS", "3"))
-FULL_TO_SHORT_2_HOURS = float(os.environ.get("FULL_TO_SHORT_2_HOURS", "7"))
+# افتراضيًا نفس قيمة FULL_VIDEO_DELAY_HOURS تحت، عشان الريل ينشر في نفس
+# توقيت الفيديو الكامل بالظبط (طلب: الفيديو والريل ينشروا معًا الساعة
+# 7 مساءً). لو حبيت تأخير مختلف للريل مستقبلاً، غيّر القيمة دي في
+# main.yml بمعزل عن FULL_VIDEO_DELAY_HOURS.
+FULL_TO_SHORT_1_HOURS = float(os.environ.get("FULL_TO_SHORT_1_HOURS", "8"))
 # الفيديو الكامل (طويل) أداؤه أفضل مساءً لما المشاهد يكون عنده وقت فراغ
 # فعلي، بعكس الشورتس اللي أداؤها أفضل صبحًا/ضهرًا أثناء تصفّح سريع —
 # فمش منطقي ينشر الفيديو الكامل فورًا وقت التشغيل (صباحًا عادة) زي ما
@@ -250,7 +265,7 @@ def metadata_for(channel_id: str, asset_type: str, title: str) -> dict | None:
         # قيم Facebook الرسمية هي post / reel / story؛ لا توجد قيمة video.
         return {"facebook": {"type": "reel" if asset_type == "short" else "post"}}
     if service == "instagram":
-        # كل الفيديوهات (الكامل والشورتس) بتتبعت كـ"reel" — لا "post"،
+        # كل الفيديوهات (الكامل والريل) بتتبعت كـ"reel" — لا "post"،
         # لأن نوع "post" عند Buffer بيفرض حد قديم 60 ثانية لفيديوهات
         # Instagram (رسالة الخطأ: "Video must be no longer than 1 minute
         # for Instagram Posts")، بينما Instagram Graph API الرسمي بيسمح
@@ -350,9 +365,7 @@ def main() -> None:
 
     shorts = sorted(OUTPUT_DIR.glob("short_*_*.mp4"))
     if not shorts:
-        sys.exit("لا توجد شورتس جاهزة للنشر.")
-    # ترتيب ثابت: short_1 ثم short_2، وداخل كل رقم المنصات.
-    shorts = sorted(shorts, key=lambda p: (int(p.stem.split("_")[1]), p.stem))
+        sys.exit("لا يوجد ريل جاهز للنشر.")
 
     ids = channel_ids()
     if not ids:
@@ -374,12 +387,14 @@ def main() -> None:
     for service in set(services.values()):
         full_urls[service] = os.environ.get(f"FULL_VIDEO_URL_{service.upper()}", "").strip() or None
 
+    # كل الريلات (حاليًا ريل واحد بس، short_1) بتاخد نفس تأخير النشر
+    # FULL_TO_SHORT_1_HOURS — مفيش تمييز بالرقم زي قبل كده لإن مفيش
+    # short_2 تاني (شوف DEFAULT_SHORT_COUNT في assemble_video.py). لو
+    # ظبطت FULL_TO_SHORT_1_HOURS بنفس قيمة FULL_VIDEO_DELAY_HOURS في
+    # main.yml، الفيديو والريل هينشروا في نفس اللحظة بالظبط.
     assets: list[tuple[str, Path, float]] = [("full_video", full_path, FULL_VIDEO_DELAY_HOURS)]
-    short_numbers = sorted({int(p.stem.split("_")[1]) for p in shorts})
-    for number in short_numbers:
-        delay = FULL_TO_SHORT_1_HOURS if number == 1 else FULL_TO_SHORT_2_HOURS
-        for path in [p for p in shorts if int(p.stem.split("_")[1]) == number]:
-            assets.append(("short", path, delay))
+    for path in shorts:
+        assets.append(("short", path, FULL_TO_SHORT_1_HOURS))
 
     successes = 0
     failures = []
