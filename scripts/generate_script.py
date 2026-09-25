@@ -31,6 +31,20 @@ generate_script.py
 اكتمال narration وتطابق narration_en، إعادة المحاولة عند القطع أو
 الخطأ) باقٍ كما هو تمامًا، لأنه منطق مستقل عن مزوّد الـ API.
 
+=== تعديل جديد: تصعيد حقيقي عند قِصر narration ===
+لوحظ إن الموديل بيميل بشكل منهجي لكتابة narration أقصر من TARGET_WORDS
+المطلوب (أحيانًا أقل من النص المطلوب بـ 40-50%)، وإن إعادة المحاولة
+القديمة كانت بترسل نفس الرسالة بالحرف الواحد من غير أي إشارة إن
+المحاولة اللي فاتت كانت قصيرة — فمفيش أي "ضغط" حقيقي يدفع الموديل
+يكتب أطول في المحاولة التالية، وأحيانًا كانت المحاولة الثانية بتطلع
+أقصر من الأولى.
+
+الحل: build_user_message() بقت بتاخد short_attempt_word_count اختياري.
+لو مبعوت، بيتضاف مقطع تحذيري صريح في آخر الرسالة يقول بالظبط عدد
+الكلمات اللي طلعت في المحاولة اللي فاتت وإنه غير مقبول، ويطلب صراحة
+كتابة نص أطول بوضوح. كمان الصياغة الأساسية اتغيّرت من "حوالي X كلمة
+(±15%)" لصياغة أوضح بإنه حد أدنى صارم ومفيش مجال للتهاون فيه.
+
 ⚠️ تنويه مهم وصادق (باقٍ كما كان مع أي مزوّد API): الموديل مايقدرش
 "يتحقق" فعليًا من صحة أي حديث أو نسبة رواية بشكل قاطع — مفيش أداة بحث
 أو مطابقة أسانيد جوه السكريبت، سواء كان المزوّد Groq أو Gemini أو غيره.
@@ -71,7 +85,9 @@ TARGET_WORDS = int(os.getenv("TARGET_WORDS", "300"))
 # موجود، الفحص متعطّل.
 MIN_NARRATION_WORDS = os.environ.get("MIN_NARRATION_WORDS")
 MIN_NARRATION_WORDS = int(MIN_NARRATION_WORDS) if MIN_NARRATION_WORDS else None
-MAX_ATTEMPTS = 2
+# رفعناها من 2 لـ 3 عشان نديله فرصة تصعيد إضافية (شوف build_user_message
+# وقسم "تصعيد حقيقي عند قِصر narration" فوق).
+MAX_ATTEMPTS = 3
 HISTORY_LIMIT = 8
 LENGTH_ESCALATION = 1.5
 
@@ -283,8 +299,18 @@ def create_completion(client: genai.Client, system_prompt: str, user_message: st
 # ─────────────────────────── التوليد ───────────────────────────
 
 def build_user_message(
-    recent_titles: list[str], recent_regions: list[str], recent_hooks: list[str],
+    recent_titles: list[str],
+    recent_regions: list[str],
+    recent_hooks: list[str],
+    short_attempt_word_count: int | None = None,
 ) -> str:
+    # الحد الأدنى الفعّال اللي بنخاطب بيه الموديل: لو فيه MIN_NARRATION_WORDS
+    # محدد في الـ workflow، بناخد الأكبر بينه وبين TARGET_WORDS عشان الرسالة
+    # متناقضش نفسها (سبق وحصل تعارض بين "حوالي 300" وحد أدنى فعلي أعلى).
+    effective_min = TARGET_WORDS
+    if MIN_NARRATION_WORDS is not None:
+        effective_min = max(effective_min, MIN_NARRATION_WORDS)
+
     message = (
         "اكتب حلقة جديدة تمامًا.\n\n"
         "⚠️ مهم جدًا بخصوص اللغة: اكتب حقل narration بالكامل باللغة العربية "
@@ -323,7 +349,14 @@ def build_user_message(
         "وخط عربي/أشخاص مجهولي الهوية بس.\n\n"
         "⚠️ التنويع: اختار عصرًا/شخصية محورية مختلفة عن اللي اتذكرت قبل "
         "كده (تحت). حط وصف المكان والعصر في حقل region.\n\n"
-        f"الطول المستهدف لحقل narration: حوالي {TARGET_WORDS} كلمة (±15%).\n"
+        f"⚠️ الطول: هذا حد أدنى صارم وليس تقريبًا: حقل narration لازم "
+        f"يحتوي على {effective_min} كلمة عربية على الأقل، ويفضَّل أن "
+        f"يكون حول {TARGET_WORDS}-{int(effective_min * 1.2)} كلمة. لا "
+        f"تتوقف عن السرد أو تنتقل للخاتمة إلا بعد أن تتأكد أن ما كتبته "
+        f"فعلاً {effective_min} كلمة أو أكثر — أضف تفاصيل حسّية ووصفية "
+        "إضافية واردة في المصدر نفسه (المكان، الأجواء، ردود الأفعال) "
+        "بدل الاختصار، بدل اختراع أي تفصيلة غير موثقة. النصوص القصيرة "
+        "سترفض تلقائيًا.\n"
         "لازم القصة تكون مكتملة: بداية واضحة (الهوك)، تصاعد حقيقي مبني "
         "على المصدر نفسه، وخاتمة فيها عبرة أو حكمة تقفل القصة من غير "
         "تقطيع.\n"
@@ -345,6 +378,16 @@ def build_user_message(
             "\n\nالعصور/الأماكن اللي اتستخدمت قبل كده (اختار عصرًا مختلفًا "
             "عنها):\n- " + "\n- ".join(recent_regions)
         )
+    if short_attempt_word_count is not None:
+        message += (
+            f"\n\n🚨 تحذير عاجل: في محاولة سابقة كتبت narration بـ "
+            f"{short_attempt_word_count} كلمة فقط، وهذا غير مقبول إطلاقًا "
+            f"لأن الحد الأدنى المطلوب هو {effective_min} كلمة. هذه المرة "
+            "اكتب قصة أطول بوضوح: وسّع في وصف المشاهد والأجواء والتفاصيل "
+            "الحسّية الواردة في المصدر نفسه (لا تخترع تفاصيل جديدة)، وتأكد "
+            f"من أن العدد النهائي للكلمات {effective_min} أو أكثر قبل أن "
+            "تُنهي الرد."
+        )
     return message
 
 
@@ -355,16 +398,24 @@ def generate_episode() -> dict:
 
     client = genai.Client(api_key=api_key)
     system_prompt = load_system_prompt()
-    user_message = build_user_message(
-        load_used_history(), load_used_regions(), load_used_hooks(),
-    )
+    recent_titles = load_used_history()
+    recent_regions = load_used_regions()
+    recent_hooks = load_used_hooks()
 
     budget = MAX_OUTPUT_TOKENS
     last_error = "لا يوجد"
+    # آخر عدد كلمات طلع قصير، بيُستخدم عشان نبني رسالة تصعيد للمحاولة
+    # التالية (شوف قسم "تصعيد حقيقي عند قِصر narration" أعلى الملف).
+    last_short_word_count: int | None = None
 
     print(f"🕌 الموديل: {MODEL} | thinking_budget: {THINKING_BUDGET}")
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        user_message = build_user_message(
+            recent_titles, recent_regions, recent_hooks,
+            short_attempt_word_count=last_short_word_count,
+        )
+
         try:
             response = create_completion(client, system_prompt, user_message, budget)
         except Exception as exc:  # noqa: BLE001 — أخطاء شبكة/حصة/حجب أمان من Gemini
@@ -400,6 +451,11 @@ def generate_episode() -> dict:
         error = validate_episode(episode)
         if error:
             last_error = error
+            # لو سبب الفشل قصر النص تحديدًا، سجّل العدد الفعلي عشان
+            # المحاولة الجاية تتبني برسالة تصعيد صريحة بالرقم ده.
+            narration_text = str(episode.get("narration", "")).strip()
+            if narration_text and "قصير جدًا" in error:
+                last_short_word_count = len(narration_text.split())
             print(f"⚠️ محاولة {attempt}/{MAX_ATTEMPTS}: {last_error} — هعيد المحاولة...")
             continue
 
