@@ -1,7 +1,7 @@
 """
 generate_script.py
 يستدعي Gemini API عشان يولّد سيناريو القصة الدينية/التاريخية الإسلامية +
-الترجمة الإنجليزية الموازية + كلمات البحث البصرية + مرجع التوثيق الشرعي.
+كلمات البحث البصرية + مرجع التوثيق الشرعي.
 
 === تعديل جديد: الانتقال من Groq إلى Gemini ===
 كانت النسخة السابقة بتستخدم Groq (نموذج openai/gpt-oss-120b). دلوقتي
@@ -28,8 +28,8 @@ generate_script.py
    القصص المولّدة محتاجة تفكير أعمق.
 
 باقي منطق الملف (تتبع العناوين/الهوكات/المناطق المستخدمة، التحقق من
-اكتمال narration وتطابق narration_en، إعادة المحاولة عند القطع أو
-الخطأ) باقٍ كما هو تمامًا، لأنه منطق مستقل عن مزوّد الـ API.
+اكتمال narration، إعادة المحاولة عند القطع أو الخطأ) باقٍ كما هو تمامًا،
+لأنه منطق مستقل عن مزوّد الـ API.
 
 === تعديل جديد: تصعيد حقيقي عند قِصر narration ===
 لوحظ إن الموديل بيميل بشكل منهجي لكتابة narration أقصر من TARGET_WORDS
@@ -44,6 +44,16 @@ generate_script.py
 الكلمات اللي طلعت في المحاولة اللي فاتت وإنه غير مقبول، ويطلب صراحة
 كتابة نص أطول بوضوح. كمان الصياغة الأساسية اتغيّرت من "حوالي X كلمة
 (±15%)" لصياغة أوضح بإنه حد أدنى صارم ومفيش مجال للتهاون فيه.
+
+=== تعديل جديد: إزالة narration_en بالكامل ===
+اتشالت الترجمة الإنجليزية من الفيديو النهائي في generate_voice.py
+(الصوت المسموع والنص المعروض بقوا عربي بس). كان narration_en وتحققه
+الصارم (تطابق عدد الجمل بالظبط بين العربي والإنجليزي) هو سبب غالبية
+فشل توليد الحلقات فعليًا — الموديل مبيلتزمش بالتطابق الدقيق ده بثبات،
+وده كان بيستهلك محاولات وتوكنز في التحقق من حقل مبقاش يتستخدم في أي
+مكان تاني في الـ pipeline من الأساس. اتشال الحقل نهائيًا من الـ
+schema والبرومبت والتحقق، مش بس اتجوهل، عشان الموديل ميضيّعش وقت/توكنز
+يكتبه من الأساس.
 
 ⚠️ تنويه مهم وصادق (باقٍ كما كان مع أي مزوّد API): الموديل مايقدرش
 "يتحقق" فعليًا من صحة أي حديث أو نسبة رواية بشكل قاطع — مفيش أداة بحث
@@ -106,8 +116,6 @@ EPISODE_SCHEMA = {
         "hook": {"type": "string"},
         "region": {"type": "string"},
         "narration": {"type": "string"},
-        # === ترجمة إنجليزية متوازية، جملة بجملة ===
-        "narration_en": {"type": "array", "items": {"type": "string"}},
         "visual_keywords": {"type": "array", "items": {"type": "string"}},
         "caption": {"type": "string"},
         "phonetic_hints": {
@@ -126,7 +134,7 @@ EPISODE_SCHEMA = {
         "source_reference": {"type": "string"},
     },
     "required": [
-        "title", "hook", "region", "narration", "narration_en",
+        "title", "hook", "region", "narration",
         "visual_keywords", "caption", "phonetic_hints",
         "source_type", "source_reference",
     ],
@@ -216,15 +224,6 @@ def looks_truncated(narration: str) -> bool:
     return not stripped.endswith((".", "!", "؟", "?", "…", '"', "”", "»"))
 
 
-def count_arabic_sentences(narration: str) -> int:
-    """بيعدّ الجمل بنفس منطق split_sentences() في generate_voice.py
-    (تقسيم بعد نقطة/تعجب/استفهام/حذف)، عشان نتأكد إن عدد عناصر
-    narration_en هيطابق عدد الجمل وقت المزامنة الفعلية مع الصوت."""
-    import re
-    parts = re.split(r"(?<=[.!؟…])\s+", narration.strip())
-    return len([part for part in parts if part.strip()])
-
-
 def validate_episode(episode: dict) -> str | None:
     """يرجّع رسالة الخطأ لو الحلقة فيها مشكلة، أو None لو سليمة."""
     if not REQUIRED_KEYS.issubset(episode.keys()):
@@ -253,20 +252,6 @@ def validate_episode(episode: dict) -> str | None:
 
     if not str(episode.get("source_reference", "")).strip():
         return "حقل source_reference فاضي — كل حلقة دينية لازم مرجع دقيق"
-
-    narration_en = episode.get("narration_en")
-    if not isinstance(narration_en, list) or not narration_en:
-        return "حقل narration_en فاضي أو مش قائمة (array)"
-    if any(not str(item).strip() for item in narration_en):
-        return "حقل narration_en فيه عنصر فاضي"
-
-    expected_sentences = count_arabic_sentences(narration)
-    if len(narration_en) != expected_sentences:
-        return (
-            f"عدد جمل narration_en ({len(narration_en)}) لا يطابق عدد "
-            f"جمل narration الفعلي ({expected_sentences}) — لازم يتطابقوا "
-            "بالظبط عشان تزامن الترجمة على الشاشة"
-        )
 
     return None
 
@@ -325,13 +310,6 @@ def build_user_message(
         "موضوع حتى لو كان منتشرًا شعبيًا. لو لست متأكدًا تمامًا من ثبوت "
         "تفصيلة ما، لا تكتبها كحقيقة قطعية — اختر واقعة أخرى أنت متأكد "
         "من ثبوتها. اذكر مصدرك بدقة في source_type وsource_reference.\n\n"
-        "⚠️ مهم جدًا بخصوص narration_en: بعد كتابة narration، اكتب مصفوفة "
-        "narration_en بحيث يكون كل عنصر فيها هو الترجمة الإنجليزية "
-        "الأمينة لجملة واحدة فقط من narration، بنفس الترتيب وبنفس العدد "
-        "بالضبط (التقسيم يكون بعد كل نقطة أو علامة تعجب أو علامة "
-        "استفهام أو علامات حذف، تمامًا كما تُقسَّم narration نفسها لجمل). "
-        "لو عدد الجمل العربية 12 جملة مثلًا، لازم narration_en تحتوي على "
-        "12 عنصرًا بالضبط لا أكثر ولا أقل.\n\n"
         "⚠️ مهم جدًا جدًا بخصوص عدم التكرار: ممنوع منعًا باتًا اختيار نفس "
         "الواقعة اللي اتستخدمت في حلقة سابقة، حتى لو غيّرت العنوان أو "
         "الصياغة بالكامل. راجع قائمة الهوكات (وليس العناوين فقط) اللي "
@@ -476,6 +454,5 @@ if __name__ == "__main__":
     print(f"   العصر/المكان: {episode.get('region', 'غير محدد')}")
     print(f"   الهوك: {episode.get('hook', '')[:80]}")
     print(f"   المصدر: {episode.get('source_type', '')} — {episode.get('source_reference', '')}")
-    print(f"   عدد جمل narration_en: {len(episode.get('narration_en', []))}")
     print(f"   كلمات البحث: {episode['visual_keywords']}")
     print(f"   تلميحات النطق: {episode.get('phonetic_hints', [])}")
