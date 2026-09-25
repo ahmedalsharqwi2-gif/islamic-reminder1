@@ -19,14 +19,15 @@ MODERN_EXCLUDE_TERMS. ده حل تقريبي معقول لكنه مش مضمون
 يفوت كليب عصري لو الرابط مالوش وصف كافٍ، أو يستبعد كليب بريء بالغلط
 لو الوصف فيه كلمة متشابهة. مفيش بديل أدق متاح فعليًا من الـ API نفسه.
 
-منطق البحث بقى بثلاث مستويات لكل كلمة بحث (شوف search_with_fallback):
-  1) نفس الكلمة + فلترة صارمة تستبعد أي كليب فيه مؤشر على عصر حديث.
-  2) لو مفيش نتائج: نفس الكلمة من غير الفلترة الصارمة (احتياطًا لكلمة
-     بحث محددة جدًا خلت الفلترة تستبعد كل شيء بالغلط).
-  3) لو لسه مفيش: البحث بدلًا من كلمة الحلقة في قائمة ثابتة من كلمات
-     دينية إسلامية عامة (ISLAMIC_FALLBACK_KEYWORDS) مع نفس الفلترة
-     الصارمة — عشان نضمن إن الكليب النهائي على الأقل مرتبط دينيًا/
-     تاريخيًا حتى لو مش مطابقًا تمامًا لتفصيلة القصة.
+منطق البحث صار صارمًا لكل كلمة بحث:
+  1) إضافة "no people" إلى استعلام Pexels لتحسين النتائج الخالية من البشر.
+  2) رفض أي كليب يظهر في وصف رابطه مؤشر على بشر، نساء، رجال، أطفال، أو
+     أي مظهر بشري.
+  3) رفض أي كليب يظهر في وصف رابطه مؤشر على عنصر حديث/معاصر.
+  4) رفض الكليب إذا لم يوجد له وصف قابل للفحص في رابط Pexels، لأن عدم القدرة
+     على التحقق لا يُعتبر موافقة.
+  5) عند عدم وجود نتائج، البحث فقط في قائمة لقطات إسلامية عامة خالية من البشر
+     وبنفس الفلترة الصارمة. لا توجد أبدًا نتيجة احتياطية غير مفلترة.
 
 === تعديل سابق: تسجيل region في الهيستوري ===
 كان الهيستوري بيسجّل "title" بس مع كل حلقة. دلوقتي بيسجّل "region" كمان
@@ -110,25 +111,48 @@ MODERN_EXCLUDE_TERMS = {
     "downtown", "contemporary", "tourist", "tourists", "selfie", "camera",
     "studio", "microphone", "headphones", "game", "gaming", "keyboard",
     "monitor", "screen", "app", "social-media", "credit-card", "atm",
+    "modern-day", "modern-city", "modern-building", "glass-building",
+    "skyscrapers", "road", "street", "crosswalk", "suburban", "city-center",
+    "airport", "railway", "bus-stop", "factory", "warehouse", "construction",
+    "plastic", "neon-light", "streetlight", "power-line", "wind-turbine",
 }
+
+# قاعدة أمان صارمة: لا نسمح بظهور أي إنسان، وليس النساء فقط.
+# الفلترة تعتمد على الوصف الموجود في رابط Pexels، وليست تحليلًا بصريًا كاملًا.
+HUMAN_EXCLUDE_TERMS = {
+    "person", "people", "human", "humans", "man", "men", "male",
+    "woman", "women", "female", "girl", "girls", "lady", "ladies",
+    "mother", "father", "family", "child", "children", "baby", "babies",
+    "boy", "boys", "face", "faces", "portrait", "body", "crowd", "crowds",
+    "people-walking", "walking", "standing", "sitting", "running", "walking-person",
+    "worshipper", "worshippers", "prayer", "praying", "pilgrim", "pilgrims",
+    "soldier", "soldiers", "warrior", "warriors", "rider", "riders",
+    "worker", "workers", "farmer", "farmers", "merchant", "merchants",
+    "king", "queen", "prince", "princess", "prophet", "historian",
+    "actor", "actress", "dancer", "model", "hand", "hands", "feet",
+    "silhouette", "shadow", "statue", "sculpture", "human-figure",
+}
+
+# إذا لم نستطع فحص وصف الرابط، نرفض الكليب بدل قبول لقطة غير مضمونة.
+REJECT_UNVERIFIABLE_SLUG = True
 
 # كلمات بحث احتياطية دينية/إسلامية عامة، مستخدمة فقط لو فشل البحث
 # بالكلمة الأصلية (حتى بعد إلغاء الفلترة الصارمة) — يعني آخر خط دفاع
 # قبل ما نضطر نتخطى الكلمة دي خالص. كلها كلمات محايدة زمنيًا (عمارة/
 # طبيعة/مخطوطات) عشان تناسب أي عصر إسلامي تقريبًا.
 ISLAMIC_FALLBACK_KEYWORDS = [
-    "islamic architecture",
-    "mosque courtyard",
-    "arabic calligraphy",
-    "old quran manuscript",
-    "desert dunes",
-    "ancient mosque",
-    "minaret silhouette",
-    "islamic geometric pattern",
-    "old stone archway",
-    "desert caravan",
-    "ancient city ruins",
-    "arabian desert night sky",
+    "empty ancient islamic architecture no people",
+    "empty historic mosque courtyard no people",
+    "arabic calligraphy manuscript close up no people",
+    "old quran manuscript close up no people",
+    "empty ancient stone archway no people",
+    "islamic geometric ornament close up no people",
+    "empty historic fortress no people",
+    "desert dunes ancient atmosphere no people",
+    "ancient mosque exterior empty no people",
+    "historic desert landscape no people",
+    "ancient city ruins empty no people",
+    "old arabian architecture empty no people",
 ]
 
 
@@ -175,6 +199,16 @@ def clip_description_slug(video: dict) -> str:
     return slug.replace("-", " ").lower()
 
 
+def contains_forbidden_human(video: dict) -> bool:
+    """ترفض أي كليب يصف رابطه وجود بشر أو هيئة بشرية."""
+    description = clip_description_slug(video)
+    if not description:
+        return REJECT_UNVERIFIABLE_SLUG
+
+    words = set(description.split())
+    return any(term in words or term in description for term in HUMAN_EXCLUDE_TERMS)
+
+
 def looks_contemporary(video: dict) -> bool:
     """True لو الوصف المستخرج من رابط الكليب فيه أي كلمة من
     MODERN_EXCLUDE_TERMS. شوف تنويه الدقة في أعلى الملف."""
@@ -186,11 +220,10 @@ def looks_contemporary(video: dict) -> bool:
 
 
 def search_pexels(
-    keyword: str, api_key: str, used_ids: set, count: int, strict_era: bool = True,
+    keyword: str, api_key: str, used_ids: set, count: int,
 ) -> list[dict]:
-    """يرجّع لحد `count` كليبات جديدة (مش مستخدمة قبل كده) لكلمة البحث دي.
-    لو strict_era=True (الافتراضي)، بيستبعد أي كليب looks_contemporary()
-    ترجع True له، حتى لو طابق كلمة البحث تقنيًا."""
+    """يرجّع كليبات جديدة قابلة للتحقق فقط: بلا بشر وبلا عناصر حديثة.
+    لا توجد نتيجة غير مفلترة؛ عدم القدرة على التحقق يعني الرفض."""
     headers = {"Authorization": api_key}
     found: list[dict] = []
     seen_ids_this_search: set[int] = set()
@@ -200,7 +233,9 @@ def search_pexels(
             break
 
         params = {
-            "query": keyword,
+            # تحسين فرص الحصول على لقطة خالية من البشر؛ الفلترة الحقيقية
+            # تتم لاحقًا ولا تعتمد على نص الاستعلام وحده.
+            "query": f"{keyword} no people",
             "orientation": "landscape",  # المصدر الأساسي للفيديو الكامل 16:9؛ الشورتس تُقص لاحقًا
             "per_page": RESULTS_PER_PAGE,
             "page": page,
@@ -220,7 +255,16 @@ def search_pexels(
                 continue
             if video["duration"] < MIN_DURATION_SECONDS:
                 continue
-            if strict_era and looks_contemporary(video):
+            # ممنوع أي شخص: امرأة، رجل، طفل، وجه، ظل أو تمثال بشري.
+            if contains_forbidden_human(video):
+                continue
+
+            # ممنوع أي عنصر حديث أو معاصر لا يطابق الحقبة التاريخية.
+            if looks_contemporary(video):
+                continue
+
+            # تجاهل أي نتيجة لا تحتوي ملفات فيديو قابلة للتنزيل.
+            if not video.get("video_files"):
                 continue
 
             # اختار أفضل جودة فيديو ملف (HD لو موجود)
@@ -246,29 +290,20 @@ def search_pexels(
 def search_with_fallback(
     keyword: str, api_key: str, used_ids: set, count: int,
 ) -> list[dict]:
-    """يبحث عن كليبات مناسبة لكلمة البحث بثلاث مستويات متدرّجة (شوف شرح
-    "قيد العصر التاريخي" أعلى الملف):
-      1) نفس الكلمة + فلترة صارمة تستبعد أي مؤشر على عصر حديث.
-      2) نفس الكلمة من غير الفلترة الصارمة (احتياطًا لكلمة محددة جدًا).
-      3) قائمة كلمات دينية إسلامية عامة (ISLAMIC_FALLBACK_KEYWORDS) مع
-         فلترة صارمة، مجمّعة من أكتر من كلمة احتياطية لو احتاج الأمر.
-    """
-    results = search_pexels(keyword, api_key, used_ids, count, strict_era=True)
-    if results:
-        return results
+    """بحث صارم بلا أي fallback غير مفلتر.
 
-    results = search_pexels(keyword, api_key, used_ids, count, strict_era=False)
+    نبحث بالكلمة الأصلية أولًا، ثم نستخدم كلمات عامة خالية من البشر فقط.
+    كل المسارات تمر بنفس فحص البشر والعصر الحديث.
+    """
+    results = search_pexels(keyword, api_key, used_ids, count)
     if results:
-        print(
-            f"⚠️  '{keyword}': مفيش كليبات مطابقة لقيد العصر التاريخي الصارم — "
-            "تم القبول بنتائج غير مفلترة زمنيًا لعدم توفر بديل أفضل"
-        )
         return results
 
     print(
-        f"⚠️  '{keyword}': لا توجد أي نتيجة مناسبة — البحث بدلًا منه في "
-        "كلمات دينية إسلامية عامة"
+        f"⚠️  '{keyword}': لا توجد لقطة موثوقة مطابقة — "
+        "سيتم البحث في لقطات إسلامية عامة خالية من البشر"
     )
+
     collected: list[dict] = []
     already_used_this_call = set(used_ids)
     for fallback_keyword in ISLAMIC_FALLBACK_KEYWORDS:
@@ -276,13 +311,14 @@ def search_with_fallback(
             break
         remaining = count - len(collected)
         fb_results = search_pexels(
-            fallback_keyword, api_key, already_used_this_call, remaining, strict_era=True,
+            fallback_keyword, api_key, already_used_this_call, remaining,
         )
         for item in fb_results:
             already_used_this_call.add(item["id"])
         collected.extend(fb_results)
+
     if collected:
-        print(f"   ↳ اتلقى {len(collected)} كليب بديل من الكلمات الدينية العامة")
+        print(f"   ↳ اتلقى {len(collected)} كليب بديل موثوق وخالٍ من البشر")
     return collected
 
 
@@ -363,7 +399,7 @@ def main():
             print(f"✅ اتنزل كليب لـ '{keyword}' (Pexels ID: {result['id']})")
 
     if not fetched_clips:
-        sys.exit("خطأ: مفيش ولا كليب واحد اتنزل — راجع الكلمات المفتاحية أو رصيد الـ API")
+        sys.exit("خطأ: مفيش ولا كليب واحد اجتاز فلترة البشر والعصر التاريخي — راجع الكلمات المفتاحية أو رصيد الـ API")
 
     # حدّث ملف التتبع
     used_data["pexels_ids_used"] = list(used_ids)
